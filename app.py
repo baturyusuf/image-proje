@@ -98,7 +98,6 @@ def calculate_ssim(original, watermarked):
     ssim_value, _ = ssim(original_norm, watermarked_norm, data_range=1.0, full=True)
     return ssim_value
 
-@st.cache_data
 def embed_watermark(_original_pil_image, key, block_size):
     """Embed watermark into RGB image using Blue channel LSB for maximum visual fidelity."""
     img = preprocess_image(_original_pil_image, block_size)
@@ -153,7 +152,6 @@ def embed_watermark(_original_pil_image, key, block_size):
     watermarked_img = Image.fromarray(watermarked_array, 'RGB')
     return watermarked_img
 
-@st.cache_data
 def verify_watermark(_image_to_check_pil, key, block_size):
     """Verify watermark and return tamper map and tampered block count."""
     img = preprocess_image(_image_to_check_pil, block_size)
@@ -214,47 +212,50 @@ def create_overlay_image(original_img, tamper_map, alpha=0.4):
     overlay = Image.blend(original_rgb, tamper_map, alpha=alpha)
     return overlay
 
-def add_random_noise(image, noise_percentage=0.1):
-    """Add random noise to RGB image for testing."""
-    img_array = np.array(image)
+def add_random_noise(image, noise_percentage=0.1, amplitude=50):
+    """Add random noise to image safely (avoid uint8 overflow)."""
+    arr = np.array(image)
 
-    # Handle both RGB and grayscale images
-    if len(img_array.shape) == 3:  # RGB image
-        height, width, channels = img_array.shape
-        total_pixels = height * width
+    # RGB
+    if arr.ndim == 3:
+        arr16 = arr.astype(np.int16)
+        h, w, c = arr16.shape
+
+        total_pixels = h * w
         pixels_to_modify = int(total_pixels * noise_percentage)
+        if pixels_to_modify <= 0:
+            return Image.fromarray(arr.astype(np.uint8), 'RGB')
 
-        # Randomly select pixels to modify
-        indices = np.random.choice(total_pixels, pixels_to_modify, replace=False)
+        # Random pixel coordinates
+        ys = np.random.randint(0, h, size=pixels_to_modify)
+        xs = np.random.randint(0, w, size=pixels_to_modify)
 
-        # Add random noise to all channels
-        for idx in indices:
-            y = idx // width
-            x = idx % width
-            # Add random value between -50 and 50 to each channel
-            for c in range(channels):
-                noise = np.random.randint(-50, 51)
-                new_value = np.clip(img_array[y, x, c] + noise, 0, 255)
-                img_array[y, x, c] = new_value
+        # Noise per channel
+        noise = np.random.randint(-amplitude, amplitude + 1, size=(pixels_to_modify, c), dtype=np.int16)
 
-        return Image.fromarray(img_array, 'RGB')
-    else:  # Grayscale image
-        height, width = img_array.shape
-        total_pixels = height * width
+        # Apply + clip
+        arr16[ys, xs, :] = np.clip(arr16[ys, xs, :] + noise, 0, 255)
+
+        return Image.fromarray(arr16.astype(np.uint8), 'RGB')
+
+    # Grayscale
+    else:
+        arr16 = arr.astype(np.int16)
+        h, w = arr16.shape
+
+        total_pixels = h * w
         pixels_to_modify = int(total_pixels * noise_percentage)
+        if pixels_to_modify <= 0:
+            return Image.fromarray(arr.astype(np.uint8), 'L')
 
-        # Randomly select pixels to modify
-        indices = np.random.choice(total_pixels, pixels_to_modify, replace=False)
+        ys = np.random.randint(0, h, size=pixels_to_modify)
+        xs = np.random.randint(0, w, size=pixels_to_modify)
 
-        # Add random noise
-        for idx in indices:
-            y = idx // width
-            x = idx % width
-            noise = np.random.randint(-50, 51)
-            new_value = np.clip(img_array[y, x] + noise, 0, 255)
-            img_array[y, x] = new_value
+        noise = np.random.randint(-amplitude, amplitude + 1, size=pixels_to_modify, dtype=np.int16)
 
-        return Image.fromarray(img_array, 'L')
+        arr16[ys, xs] = np.clip(arr16[ys, xs] + noise, 0, 255)
+
+        return Image.fromarray(arr16.astype(np.uint8), 'L')
 
 def add_text_overlay(image, text, font_size, text_color, x, y):
     """Add text overlay to image."""
@@ -346,7 +347,7 @@ def main():
     if page == "Mühürleme (Embed)":
         embed_page(secret_key, BLOCK_SIZE)
     elif page == "Saldırı Laboratuvarı (Attack)":
-        attack_page()
+        attack_page(BLOCK_SIZE)
     elif page == "Doğrulama (Verify)":
         verify_page(secret_key, BLOCK_SIZE)
 
@@ -453,7 +454,7 @@ def embed_page(secret_key, block_size):
             4. Any tampering will change the hash, making the watermark fragile
             """)
 
-def attack_page():
+def attack_page(block_size):
     st.title("🎯 Saldırı Laboratuvarı (Attack Laboratory)")
     st.markdown("Simulate tampering attacks on watermarked images.")
 
@@ -466,6 +467,9 @@ def attack_page():
 
     if uploaded_file is not None:
         image = Image.open(uploaded_file)
+
+        image = preprocess_image(image, block_size)
+
 
         st.markdown("### Attack Methods")
 
@@ -488,18 +492,27 @@ def attack_page():
 
             st.markdown("**Add random noise** to simulate image degradation or compression artifacts.")
 
-            noise_level = st.slider(
+            noise_percent = st.slider(
                 "Noise percentage:",
-                min_value=0.01,
-                max_value=0.5,
-                value=0.1,
-                step=0.01,
-                format="%.2f%%"
+                min_value=1,
+                max_value=50,
+                value=10,
+                step=1,
+                format="%d%%"
             )
 
             if st.button("Apply Random Noise"):
                 with st.spinner("Adding noise..."):
-                    attacked_image = add_random_noise(image, noise_level)
+                    attacked_image = add_random_noise(image, noise_percent / 100.0)
+                    orig_arr = np.array(image)
+                    atk_arr = np.array(attacked_image)
+
+                    if orig_arr.ndim == 3:
+                        changed_pixels = np.mean(np.any(orig_arr != atk_arr, axis=2))
+                    else:
+                        changed_pixels = np.mean(orig_arr != atk_arr)
+
+                    st.metric("Changed pixel ratio", f"{changed_pixels * 100:.2f}%")
 
         if attacked_image is not None:
             with col2:
@@ -532,6 +545,8 @@ def verify_page(secret_key, block_size):
 
     if uploaded_file is not None:
         suspect_image = Image.open(uploaded_file)
+        file_bytes = uploaded_file.getvalue()
+        st.caption(f"Uploaded file SHA256 (first 16): {hashlib.sha256(file_bytes).hexdigest()[:16]}")
 
         # Verify watermark
         with st.spinner("Verifying watermark..."):
