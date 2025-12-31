@@ -6,6 +6,9 @@ import random
 import io
 import math
 from skimage.metrics import structural_similarity as ssim
+from robust_wavelet import embed_robust_id, check_robust_id
+from PIL import Image, ImageOps, ImageDraw, ImageFont, ImageFilter
+
 
 # Page configuration
 st.set_page_config(
@@ -350,270 +353,403 @@ def main():
         attack_page(BLOCK_SIZE)
     elif page == "Doğrulama (Verify)":
         verify_page(secret_key, BLOCK_SIZE)
-
 def embed_page(secret_key, block_size):
     st.title("🛡️ Mühürleme (Embed Watermark)")
     st.markdown("Upload an image to embed an invisible fragile watermark.")
 
-    # File upload
+    st.markdown("### 🧾 Robust ID Watermark (Wavelet) (Optional)")
+    enable_robust = st.checkbox("Enable robust ID watermark", value=True)
+    robust_id = st.text_input("Watermark ID", value="ID-0001", help="Robust watermark ID to embed")
+    robust_alpha = st.slider("Robust alpha (strength)", 0.5, 10.0, 2.0, 0.1)
+
+    st.markdown("---")
+
     uploaded_file = st.file_uploader(
         "Choose an image file (PNG/JPG)",
         type=["png", "jpg", "jpeg"],
         help="Upload the original image you want to watermark"
     )
 
-    if uploaded_file is not None:
-        # Load and display original image
-        original_image = Image.open(uploaded_file)
+    if uploaded_file is None:
+        return
 
-        col1, col2 = st.columns(2)
+    original_image = Image.open(uploaded_file)
 
-        with col1:
-            st.subheader("Original Image")
-            st.image(original_image, use_container_width=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Original Image")
+        st.image(original_image, use_container_width=True)
 
-        # Process image
-        with st.spinner("Embedding watermark..."):
-            watermarked_image = embed_watermark(original_image, secret_key, block_size)
+    with st.spinner("Embedding watermark(s)..."):
+        # 0) Preprocess once (crop to multiples of fragile block_size, keep RGB)
+        processed_original = preprocess_image(original_image, block_size)
 
-            # Calculate quality metrics
-            processed_original = preprocess_image(original_image, block_size)
-            psnr_value = calculate_psnr(processed_original, watermarked_image)
-            ssim_value = calculate_ssim(processed_original, watermarked_image)
+        # 1) Robust ID first (optional)
+        base_for_fragile = processed_original
+        if enable_robust:
+            base_for_fragile = embed_robust_id(
+                img_rgb=processed_original,
+                watermark_id=robust_id,
+                secret_key=secret_key,      # isterseniz robust için ayrı key de alabilirsiniz
+                alpha=robust_alpha,
+                block_size=4,
+                wavelet="haar",
+            )
 
-        with col2:
-            st.subheader("Watermarked Image")
-            st.image(watermarked_image, use_column_width=True)
+        # 2) Fragile watermark always last (integrity)
+        watermarked_image = embed_watermark(base_for_fragile, secret_key, block_size)
 
-        # Metrics
-        st.markdown("### Quality Metrics (Maximum Visual Fidelity)")
+        # Quality metrics (reference: processed_original vs final output)
+        psnr_value = calculate_psnr(processed_original, watermarked_image)
+        ssim_value = calculate_ssim(processed_original, watermarked_image)
 
-        # PSNR Display
-        col_psnr, col_ssim = st.columns(2)
-        with col_psnr:
-            if psnr_value == float('inf'):
-                st.success("**PSNR:** ∞ dB\n\n*Images are identical*")
+    with col2:
+        st.subheader("Watermarked Image")
+        st.image(watermarked_image, use_container_width=True)
+
+    st.markdown("### Quality Metrics")
+
+    col_psnr, col_ssim = st.columns(2)
+    with col_psnr:
+        if psnr_value == float("inf"):
+            st.success("**PSNR:** ∞ dB\n\n*Images are identical*")
+        else:
+            if psnr_value > 50:
+                st.success(f"**PSNR:** {psnr_value:.2f} dB ✅\n\n*Excellent quality preservation*")
+            elif psnr_value > 30:
+                st.info(f"**PSNR:** {psnr_value:.2f} dB\n\n*Good quality*")
             else:
-                if psnr_value > 50:
-                    st.success(f"**PSNR:** {psnr_value:.2f} dB ✅\n\n*Excellent quality preservation*")
-                elif psnr_value > 30:
-                    st.info(f"**PSNR:** {psnr_value:.2f} dB\n\n*Good quality*")
-                else:
-                    st.warning(f"**PSNR:** {psnr_value:.2f} dB\n\n*Quality degradation detected*")
+                st.warning(f"**PSNR:** {psnr_value:.2f} dB\n\n*Quality degradation detected*")
 
-        # SSIM Display
-        with col_ssim:
-            if ssim_value > 0.99:
-                st.success(f"**SSIM:** {ssim_value:.4f} ✅\n\n*Perfect structural similarity*")
-            elif ssim_value > 0.95:
-                st.info(f"**SSIM:** {ssim_value:.4f}\n\n*High structural similarity*")
-            else:
-                st.warning(f"**SSIM:** {ssim_value:.4f}\n\n*Structural differences detected*")
+    with col_ssim:
+        if ssim_value > 0.99:
+            st.success(f"**SSIM:** {ssim_value:.4f} ✅\n\n*Perfect structural similarity*")
+        elif ssim_value > 0.95:
+            st.info(f"**SSIM:** {ssim_value:.4f}\n\n*High structural similarity*")
+        else:
+            st.warning(f"**SSIM:** {ssim_value:.4f}\n\n*Structural differences detected*")
 
-        # Technical details about fidelity
-        with st.expander("🔬 Fidelity Details"):
-            st.markdown(f"""
-            **Embedding Strategy:**
-            - **RGB Mode**: No grayscale conversion for maximum color fidelity
-            - **Blue Channel LSB**: Only Blue channel LSBs modified (±1 max change per pixel)
-            - **Strict LSB Constraint**: Uses `val & 0xFE | bit` for minimal perturbation
-            - **Block Size**: {block_size}x{block_size} pixels
-            - **Hash Algorithm**: SHA-256 per block + secret key
+    with st.expander("🔬 Fidelity Details"):
+        st.markdown(f"""
+        **Pipeline (Order Matters):**
+        1. **Robust ID (Wavelet)** *(optional)*: embeds an ID in the **luminance (Y)** channel using DWT (haar).
+        2. **Fragile Integrity (LSB + Block Hash)** *(always)*: embeds per-block SHA-256 hashes into **Blue-channel LSB**.
 
-            **Quality Targets:**
-            - PSNR > 50 dB (excellent)
-            - SSIM > 0.99 (near-perfect structural similarity)
-            - Human eye cannot detect differences
-            """)
+        **Fragile Embedding Strategy:**
+        - **RGB Mode**: No grayscale conversion for maximum color fidelity
+        - **Blue Channel LSB**: Only Blue channel LSBs modified (±1 max change per pixel)
+        - **Block Size**: {block_size}x{block_size} pixels
+        - **Hash Algorithm**: SHA-256 per block + secret key
 
-        # Download button
-        buf = io.BytesIO()
-        watermarked_image.save(buf, format="PNG")
-        buf.seek(0)
+        **Quality Targets:**
+        - PSNR > 50 dB (excellent)
+        - SSIM > 0.99 (near-perfect structural similarity)
+        """)
 
-        st.download_button(
-            label="📥 Download Watermarked Image (PNG)",
-            data=buf,
-            file_name="watermarked_image.png",
-            mime="image/png",
-            help="Download the watermarked image as PNG (lossless format)"
-        )
+    # Download
+    buf = io.BytesIO()
+    watermarked_image.save(buf, format="PNG")
+    buf.seek(0)
 
-        # Technical details
-        with st.expander("🔧 Technical Details"):
-            st.markdown(f"""
-            **Processing Summary:**
-            - Block Size: {block_size}x{block_size}
-            - Secret Key: `{secret_key[:8]}...`
-            - PSNR: {psnr_value:.2f} dB
+    st.download_button(
+        label="📥 Download Watermarked Image (PNG)",
+        data=buf,
+        file_name="watermarked_image.png",
+        mime="image/png",
+        help="Download the watermarked image as PNG (lossless format)"
+    )
 
-            **How it works:**
-            1. Image is converted to grayscale and resized to be divisible by {block_size}
-            2. Each {block_size}x{block_size} block gets a SHA-256 hash of its MSB data + secret key
-            3. Hashes are embedded into LSBs of mapped blocks using the secret key
-            4. Any tampering will change the hash, making the watermark fragile
-            """)
+    with st.expander("🔧 Technical Details"):
+        st.markdown(f"""
+        **Processing Summary:**
+        - Fragile Block Size: {block_size}x{block_size}
+        - Robust Enabled: {enable_robust}
+        - Robust ID: `{robust_id}`
+        - Robust alpha: {robust_alpha:.1f}
+        - Secret Key: `{secret_key[:8]}...`
+        - PSNR: {psnr_value:.2f} dB
+        - SSIM: {ssim_value:.4f}
+
+        **How it works (high-level):**
+        - Robust watermark targets survivability (JPEG, resize, blur, noise).
+        - Fragile watermark targets integrity (any tamper triggers hash mismatch).
+        """)
+
 
 def attack_page(block_size):
     st.title("🎯 Saldırı Laboratuvarı (Attack Laboratory)")
     st.markdown("Simulate tampering attacks on watermarked images.")
 
-    # File upload
     uploaded_file = st.file_uploader(
         "Upload Watermarked Image",
         type=["png", "jpg", "jpeg"],
         help="Upload a watermarked image to simulate attacks on"
     )
 
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
+    if uploaded_file is None:
+        return
 
-        image = preprocess_image(image, block_size)
+    # Local helpers (keeps changes self-contained)
+    def jpeg_compress_pil(image: Image.Image, quality: int) -> Image.Image:
+        img_rgb = image.convert("RGB")
+        buf = io.BytesIO()
+        img_rgb.save(buf, format="JPEG", quality=quality)
+        buf.seek(0)
+        return Image.open(buf).convert("RGB")
 
+    def resize_attack_pil(image: Image.Image, scale: float) -> Image.Image:
+        img = image.convert("RGB")
+        w, h = img.size
+        w2 = max(1, int(w * scale))
+        h2 = max(1, int(h * scale))
+        down = img.resize((w2, h2), Image.BICUBIC)
+        up = down.resize((w, h), Image.BICUBIC)
+        return up
 
-        st.markdown("### Attack Methods")
+    def gaussian_blur_pil(image: Image.Image, radius: float) -> Image.Image:
+        return image.convert("RGB").filter(ImageFilter.GaussianBlur(radius=radius))
 
-        attack_method = st.radio(
-            "Choose attack method:",
-            ["Random Noise"],  # Temporarily only Random Noise due to canvas compatibility issues
-            horizontal=True
+    image = Image.open(uploaded_file)
+    image = preprocess_image(image, block_size)
+
+    st.markdown("### Attack Methods")
+
+    attack_method = st.radio(
+        "Choose attack method:",
+        ["Random Noise", "JPEG Compression", "Resizing", "Gaussian Blur"],
+        horizontal=True
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Input Image")
+        st.image(image, use_container_width=True)
+
+    attacked_image = None
+
+    if attack_method == "Random Noise":
+        st.markdown("Add random noise to simulate degradation or compression artifacts.")
+        noise_percent = st.slider(
+            "Noise percentage:",
+            min_value=1,
+            max_value=50,
+            value=10,
+            step=1,
+            format="%d%%"
+        )
+        amplitude = st.slider(
+            "Noise amplitude (±)",
+            min_value=1,
+            max_value=80,
+            value=50,
+            step=1
         )
 
-        col1, col2 = st.columns(2)
+        if st.button("Apply Random Noise"):
+            with st.spinner("Adding noise..."):
+                attacked_image = add_random_noise(image, noise_percent / 100.0, amplitude=amplitude)
 
-        with col1:
-            st.subheader("Original Image")
-            st.image(image, use_container_width=True)
+    elif attack_method == "JPEG Compression":
+        st.markdown("JPEG compression simulates lossy re-encoding.")
+        quality = st.slider("JPEG quality", min_value=5, max_value=95, value=50, step=1)
 
-        attacked_image = None
+        if st.button("Apply JPEG Compression"):
+            with st.spinner("Applying JPEG compression..."):
+                attacked_image = jpeg_compress_pil(image, quality=quality)
 
-        if attack_method == "Random Noise":
-            st.markdown("**Draw on the image** to simulate tampering (e.g., adding text or covering objects).")
+    elif attack_method == "Resizing":
+        st.markdown("Downscale then upscale back to original size.")
+        scale = st.slider("Scale factor", min_value=0.30, max_value=0.95, value=0.50, step=0.01)
 
-            st.markdown("**Add random noise** to simulate image degradation or compression artifacts.")
+        if st.button("Apply Resizing"):
+            with st.spinner("Applying resizing..."):
+                attacked_image = resize_attack_pil(image, scale=scale)
 
-            noise_percent = st.slider(
-                "Noise percentage:",
-                min_value=1,
-                max_value=50,
-                value=10,
-                step=1,
-                format="%d%%"
-            )
+    elif attack_method == "Gaussian Blur":
+        st.markdown("Gaussian blur simulates defocus / smoothing.")
+        radius = st.slider("Blur radius", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
 
-            if st.button("Apply Random Noise"):
-                with st.spinner("Adding noise..."):
-                    attacked_image = add_random_noise(image, noise_percent / 100.0)
-                    orig_arr = np.array(image)
-                    atk_arr = np.array(attacked_image)
+        if st.button("Apply Gaussian Blur"):
+            with st.spinner("Applying blur..."):
+                attacked_image = gaussian_blur_pil(image, radius=radius)
 
-                    if orig_arr.ndim == 3:
-                        changed_pixels = np.mean(np.any(orig_arr != atk_arr, axis=2))
-                    else:
-                        changed_pixels = np.mean(orig_arr != atk_arr)
+    if attacked_image is None:
+        return
 
-                    st.metric("Changed pixel ratio", f"{changed_pixels * 100:.2f}%")
+    # Metric: changed pixel ratio
+    orig_arr = np.array(image)
+    atk_arr = np.array(attacked_image)
 
-        if attacked_image is not None:
-            with col2:
-                st.subheader("Attacked (Random Noise)")
-                st.image(attacked_image, use_container_width=True)
+    if orig_arr.ndim == 3:
+        changed_pixels = np.mean(np.any(orig_arr != atk_arr, axis=2))
+    else:
+        changed_pixels = np.mean(orig_arr != atk_arr)
 
-            # Download attacked image
-            buf = io.BytesIO()
-            attacked_image.save(buf, format="PNG")
-            buf.seek(0)
+    with col2:
+        st.subheader(f"Attacked ({attack_method})")
+        st.image(attacked_image, use_container_width=True)
+        st.metric("Changed pixel ratio", f"{changed_pixels * 100:.2f}%")
 
-            st.download_button(
-                label="📥 Download Attacked Image",
-                data=buf,
-                file_name="attacked_random_noise.png",
-                mime="image/png",
-                help="Download the attacked image for verification testing"
-            )
+    # Download attacked image
+    buf = io.BytesIO()
+    attacked_image.save(buf, format="PNG")
+    buf.seek(0)
+
+    st.download_button(
+        label="📥 Download Attacked Image (PNG)",
+        data=buf,
+        file_name=f"attacked_{attack_method.lower().replace(' ', '_')}.png",
+        mime="image/png",
+        help="Download the attacked image for verification testing"
+    )
+
 
 def verify_page(secret_key, block_size):
     st.title("🔍 Doğrulama (Verify Watermark)")
     st.markdown("Upload a suspect image to verify its integrity and detect tampering.")
 
-    # File upload
     uploaded_file = st.file_uploader(
         "Upload Suspect Image",
         type=["png", "jpg", "jpeg"],
         help="Upload the image you want to verify for tampering"
     )
 
-    if uploaded_file is not None:
-        suspect_image = Image.open(uploaded_file)
-        file_bytes = uploaded_file.getvalue()
-        st.caption(f"Uploaded file SHA256 (first 16): {hashlib.sha256(file_bytes).hexdigest()[:16]}")
+    if uploaded_file is None:
+        return
 
-        # Verify watermark
-        with st.spinner("Verifying watermark..."):
-            tamper_map, tampered_blocks = verify_watermark(suspect_image, secret_key, block_size)
+    suspect_image = Image.open(uploaded_file)
+    file_bytes = uploaded_file.getvalue()
+    st.caption(f"Uploaded file SHA256 (first 16): {hashlib.sha256(file_bytes).hexdigest()[:16]}")
 
-        # Results
-        st.markdown("### Verification Results")
+    with st.spinner("Verifying fragile watermark..."):
+        tamper_map, tampered_blocks = verify_watermark(suspect_image, secret_key, block_size)
 
-        if tampered_blocks == 0:
-            st.success("🛡️ **SECURE** - Image integrity verified!")
-            st.markdown("No tampering detected. The image is authentic and unchanged.")
-        else:
-            st.error("⚠️ **TAMPERED** - Image has been modified!")
-            st.markdown(f"**{tampered_blocks}** blocks show signs of tampering.")
+    st.markdown("### Fragile Verification Results")
 
-        # Visualization
-        processed_suspect = preprocess_image(suspect_image, block_size)
-        overlay_image = create_overlay_image(processed_suspect, tamper_map, alpha=0.4)
+    if tampered_blocks == 0:
+        st.success("🛡️ **SECURE** - Image integrity verified!")
+        st.markdown("No tampering detected. The image is authentic and unchanged.")
+    else:
+        st.error("⚠️ **TAMPERED** - Image has been modified!")
+        st.markdown(f"**{tampered_blocks}** blocks show signs of tampering.")
 
-        col1, col2, col3 = st.columns(3)
+    processed_suspect = preprocess_image(suspect_image, block_size)
+    overlay_image = create_overlay_image(processed_suspect, tamper_map, alpha=0.4)
 
-        with col1:
-            st.subheader("Suspect Image")
-            st.image(processed_suspect, use_column_width=True)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.subheader("Suspect Image")
+        st.image(processed_suspect, use_container_width=True)
 
-        with col2:
-            st.subheader("Tamper Map")
-            st.image(tamper_map, use_column_width=True)
-            st.caption("Red areas indicate tampered blocks")
+    with col2:
+        st.subheader("Tamper Map")
+        st.image(tamper_map, use_container_width=True)
+        st.caption("Red areas indicate tampered blocks")
 
-        with col3:
-            st.subheader("Overlay")
-            st.image(overlay_image, use_column_width=True)
-            st.caption("Tamper map blended with suspect image")
+    with col3:
+        st.subheader("Overlay")
+        st.image(overlay_image, use_container_width=True)
+        st.caption("Tamper map blended with suspect image")
 
-        # Download tamper map
-        buf = io.BytesIO()
-        tamper_map.save(buf, format="PNG")
-        buf.seek(0)
+    # Download tamper map
+    buf = io.BytesIO()
+    tamper_map.save(buf, format="PNG")
+    buf.seek(0)
 
-        st.download_button(
-            label="📥 Download Tamper Map",
-            data=buf,
-            file_name="tamper_map.png",
-            mime="image/png",
-            help="Download the tamper detection map"
+    st.download_button(
+        label="📥 Download Tamper Map (PNG)",
+        data=buf,
+        file_name="tamper_map.png",
+        mime="image/png",
+        help="Download the tamper detection map"
+    )
+
+    with st.expander("🔧 Fragile Technical Details"):
+        processed_width, processed_height = processed_suspect.size
+        total_blocks = (processed_width // block_size) * (processed_height // block_size)
+
+        st.markdown(f"""
+        **Verification Summary:**
+        - Total blocks analyzed: {total_blocks}
+        - Tampered blocks: {tampered_blocks}
+        - Integrity: {((total_blocks - tampered_blocks) / total_blocks * 100):.1f}%
+        - Secret Key: `{secret_key[:8]}...`
+
+        **How fragile verification works:**
+        1. Recreate the block mapping using the secret key
+        2. Extract embedded hashes from LSBs of mapped blocks
+        3. Calculate current hashes from MSB data of each block
+        4. Compare embedded vs. current hashes
+        5. Mark blocks as tampered if hashes don't match
+        """)
+
+    # -------------------------
+    # Robust ID verification (non-blind)
+    # -------------------------
+    with st.expander("🧾 Robust ID Verification (Wavelet)"):
+        st.markdown("Robust extraction **requires the original cover image** (non-blind detection).")
+
+        orig_file = st.file_uploader(
+            "Upload Original (Cover) Image (required)",
+            type=["png", "jpg", "jpeg"],
+            key="robust_orig_cover"
         )
 
-        # Technical details
-        with st.expander("🔧 Technical Details"):
-            processed_width, processed_height = processed_suspect.size
-            total_blocks = (processed_width // block_size) * (processed_height // block_size)
+        expected_id = st.text_input(
+            "Expected Watermark ID",
+            value="ID-0001",
+            key="robust_expected_id"
+        )
 
-            st.markdown(f"""
-            **Verification Summary:**
-            - Total blocks analyzed: {total_blocks}
-            - Tampered blocks: {tampered_blocks}
-            - Integrity: {((total_blocks - tampered_blocks) / total_blocks * 100):.1f}%
-            - Secret Key: `{secret_key[:8]}...`
+        robust_alpha_v = st.slider(
+            "Robust alpha (must match embedding)",
+            0.5, 10.0, 2.0, 0.1,
+            key="robust_alpha_v"
+        )
 
-            **How verification works:**
-            1. Recreate the block mapping using the secret key
-            2. Extract embedded hashes from LSBs of mapped blocks
-            3. Calculate current hashes from MSB data of each block
-            4. Compare embedded vs. current hashes
-            5. Mark blocks as tampered if hashes don't match
-            """)
+        robust_thr = st.slider(
+            "Detection threshold",
+            0.0, 30.0, 11.79, 0.01,
+            key="robust_thr"
+        )
+
+        if orig_file is None:
+            st.info("Upload the original (cover) image to run robust ID verification.")
+            return
+
+        original_cover = Image.open(orig_file)
+        processed_cover = preprocess_image(original_cover, block_size)
+
+        with st.spinner("Checking robust ID watermark..."):
+            found, sim, expected_wm, extracted_wm = check_robust_id(
+                original_rgb=processed_cover,
+                suspect_rgb=processed_suspect,
+                watermark_id=expected_id,
+                secret_key=secret_key,
+                alpha=robust_alpha_v,
+                threshold=robust_thr,
+                block_size=4,
+                wavelet="haar",
+            )
+
+        st.metric("Similarity", f"{sim:.2f}")
+
+        if found:
+            st.success("✅ Robust ID watermark detected (ID match).")
+        else:
+            st.warning("❌ Robust ID watermark NOT detected (or parameters mismatch / heavy distortion).")
+
+        # Visualize expected vs extracted (32x32)
+        exp_img = Image.fromarray((expected_wm * 255).astype(np.uint8), mode="L").resize((256, 256), Image.NEAREST)
+        ext_img = Image.fromarray((extracted_wm * 255).astype(np.uint8), mode="L").resize((256, 256), Image.NEAREST)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.caption("Expected watermark (32x32)")
+            st.image(exp_img, use_container_width=True)
+        with c2:
+            st.caption("Extracted watermark (32x32)")
+            st.image(ext_img, use_container_width=True)
 
 if __name__ == "__main__":
     main()

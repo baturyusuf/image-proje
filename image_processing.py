@@ -8,7 +8,7 @@ Original file is located at
 """
 
 # Gerekli kütüphaneleri kur
-!pip install Pillow numpy matplotlib
+# !pip install Pillow numpy matplotlib
 
 # Gerekli kütüphaneleri içe aktar
 import os
