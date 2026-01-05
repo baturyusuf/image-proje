@@ -266,4 +266,19 @@ Recommendation:
 * `pywavelets` – wavelet transforms (robust watermark)
 * `scipy`, `scikit-image` – filtering, resizing, SSIM
 * `mpmath` – APDCBT helper math
-
+---
+graph TD
+  IMG[Input image] --> PRE[Preprocess crop to 16]
+  PRE --> RWM[Robust watermark on Y channel]
+  RWM --> META[Metadata NPZ JSON]
+  RWM --> FWM[Fragile watermark LSB on B channel]
+  FWM --> OUT[Watermarked image]
+  OUT --> ATK[Attacks]
+  ATK --> AOUT[Attacked image]
+  OUT --> SUS[Suspect image]
+  AOUT --> SUS
+  SUS --> FVER[Fragile verify and tamper map]
+  FVER --> TMAP[Tamper map result]
+  SUS --> RVER[Robust verify with metadata]
+  META --> RVER
+  RVER --> SCORE[Similarity score and decision]
