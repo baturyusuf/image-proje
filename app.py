@@ -434,11 +434,15 @@ Verification has **two independent outputs**:
             else:
                 st.error("ROBUST WATERMARK LOST — ID watermark could not be reliably detected.")
 
-            c1, c2 = st.columns(2)
-            with c1:
-                st.image(robust_res["expected_mark"], caption="Expected mark (from ID)", use_container_width=True)
-            with c2:
-                st.image(robust_res["extracted_mark"], caption="Extracted mark (from suspect)", use_container_width=True)
+            # --- VISUAL FIX: binary 0/1 arrays look black in uint8; scale to 0/255 for display ---
+            expected_vis = (robust_res["expected_mark"].astype(np.uint8) * 255)
+            extracted_vis = (robust_res["extracted_mark"].astype(np.uint8) * 255)
+
+            # c1, c2 = st.columns(2)
+            # with c1:
+            #     st.image(expected_vis, caption="Expected mark (from ID)", use_container_width=True)
+            # with c2:
+            #     st.image(extracted_vis, caption="Extracted mark (from suspect)", use_container_width=True)
 
         else:
             st.info("Upload the robust metadata (.npz) to run robust verification.")
