@@ -164,6 +164,73 @@ Then use the sidebar navigation:
   * `WAVELET`
   * `MARK_SIZE`
 
+### Wavelet Transform Details
+
+The wavelet-based robust watermarking uses a multi-stage transformation process:
+
+#### 1. Discrete Wavelet Transform (DWT)
+* **Wavelet Type**: Haar wavelet (default)
+* **Decomposition Levels**: 2-level DWT
+* **Transform Process**:
+  1. First level: `image → (LL1, (LH1, HL1, HH1))`
+  2. Second level: `LL1 → (LL2, (LH2, HL2, HH2))`
+
+#### 2. Sub-band Selection
+* **LH2 (Level 2 Horizontal Detail)**: Contains horizontal edge information
+* **HL2 (Level 2 Vertical Detail)**: Contains vertical edge information
+* **Rationale**: Detail coefficients are more robust to common image processing attacks
+
+#### 3. APDCBT Transform (Block-level)
+* **Block Size**: 4×4 pixels (default)
+* **Transform**: Adaptive Polar Cosine Discrete Basis Transform
+* **Purpose**: Provides additional energy compaction and robustness
+* **Mathematical Basis**: Uses cosine basis functions with adaptive weighting
+
+#### 4. Coefficient Selection Strategy
+* **Selection Method**: Magnitude-based ranking
+* **Selection Count**: Top coefficients excluding DC component (MARK_SIZE = 1024)
+* **Embedding Locations**: Stored in metadata for semi-blind detection
+
+#### 5. Watermark Modulation
+* **Modulation Type**: Additive modulation of coefficient magnitudes
+* **Strength Parameter**: `ALPHA = 2.0` (default)
+* **Formula**: `Y_modified[i] = Y_original[i] + ALPHA × watermark_bit[i]`
+* **Sign Preservation**: Coefficient signs are maintained during modulation
+
+#### 6. Inverse Transform
+* **Reconstruction**: IDWT (Inverse DWT) in reverse order
+* **Process**: `LL2 → LL1 → reconstructed_image`
+
+### Mathematical Formulation
+
+For a coefficient block `C` of size 4×4:
+
+1. **APDCBT Forward**: `Y = APDCBT(C)`
+2. **Coefficient Ranking**: `indices = argsort(|Y|)[1:MARK_SIZE+1]`
+3. **Watermark Embedding**:
+   ```
+   Y_watermarked[indices[i]] = Y_original[indices[i]] + α × w[i]
+   ```
+4. **APDCBT Inverse**: `C_watermarked = IAPDCBT(Y_watermarked)`
+
+### APDCBT Transform Details
+
+The Adaptive Polar Cosine Discrete Basis Transform is defined as:
+
+```
+V[m,n] = (N-m)/N²                    if n = 0
+V[m,n] = ((N-m)cos(mnπ/N) - csc(nπ/N)sin(mnπ/N))/N²    otherwise
+
+Y = V × C × V^T  (Forward transform)
+C = V⁻¹ × Y × (V⁻¹)^T  (Inverse transform)
+```
+
+Where:
+- `N`: Block size (4)
+- `V`: Transform matrix
+- `C`: Input coefficient block
+- `Y`: Transformed coefficients
+
 ### Semi-blind verification (metadata-driven)
 
 Instead of requiring the full original image during verification, the system stores a **reference package**:
@@ -173,6 +240,24 @@ Instead of requiring the full original image during verification, the system sto
 * expected watermark mark
 
 These are stored in the downloadable `.npz`, enabling verification later without the original image.
+
+### Wavelet Robustness Characteristics
+
+The wavelet-based approach provides robustness against common attacks through:
+
+* **Frequency Domain Embedding**: Watermark embedded in mid-frequency bands (LH2/HL2)
+* **Magnitude-based Selection**: Uses perceptually significant coefficients
+* **Block-wise Processing**: APDCBT provides additional energy compaction
+* **Multi-band Redundancy**: Watermark split across LH2 and HL2 sub-bands
+
+**Expected Attack Resistance**:
+* ✅ **JPEG Compression**: Mid-range quality factors (QF > 70)
+* ✅ **Gaussian Noise**: Low to moderate noise levels (σ < 15)
+* ✅ **Geometric Attacks**: Minor resizing (±10%), cropping
+* ✅ **Filtering**: Light blur, median filtering (small kernels)
+* ⚠️ **Severe Compression**: Very low QF (< 50) may cause detection failure
+* ❌ **Geometric Warping**: Rotation, scaling beyond ±15%
+* ❌ **Heavy Filtering**: Large blur kernels, aggressive sharpening
 
 ---
 
@@ -233,16 +318,29 @@ Key constants used by the app (see `app.py`):
 
 * Robust (from `src/robust/*.py`):
 
-  * `BLOCK_SIZE`
-  * `ALPHA`
-  * `WAVELET`
-  * `MARK_SIZE`
-  * `THRESHOLD`
+  * `BLOCK_SIZE = 4` (4×4 APDCBT blocks)
+  * `ALPHA = 2.0` (watermark embedding strength)
+  * `WAVELET = "haar"` (wavelet basis function)
+  * `MARK_SIZE = 1024` (32×32 watermark matrix)
+  * `THRESHOLD = 11.79` (similarity detection threshold)
+
+### Wavelet Parameter Details
+
+* **BLOCK_SIZE**: Size of APDCBT transform blocks (4×4 = 16 coefficients)
+* **ALPHA**: Controls watermark strength vs. image quality trade-off
+  * Higher values = stronger watermark, more visible artifacts
+  * Lower values = weaker watermark, better image quality
+* **WAVELET**: Basis function for DWT ("haar", "db2", "bior2.2", etc.)
+  * "haar" provides good frequency localization and computational efficiency
+* **MARK_SIZE**: Total watermark bits (1024 = 32×32 binary matrix)
+* **THRESHOLD**: Minimum similarity score for positive detection
+  * Based on statistical analysis of false positive rates
 
 Recommendation:
 
 * Keep robust parameters consistent between embed and verify.
 * Use a strong, unique fragile secret key for meaningful integrity verification.
+* Test different ALPHA values (1.0-3.0) to balance robustness vs. quality.
 
 ---
 
